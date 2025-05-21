@@ -17,9 +17,61 @@ func unlockDevice(targetIP string) error {
 	return nil
 }
 
+// getLocalIP returns the first non-loopback IPv4 address found on the system.
+func getLocalIP() (string, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "", err
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+			ip = ip.To4()
+			if ip == nil {
+				continue
+			}
+			return ip.String(), nil
+		}
+	}
+	return "", fmt.Errorf("no connected network interface found")
+}
+
+// extrapolateRouterIP guesses the router IP based on the local IP (assumes /24 subnet).
+func extrapolateRouterIP(localIP string) (string, error) {
+	parts := strings.Split(localIP, ".")
+	if len(parts) != 4 {
+		return "", fmt.Errorf("invalid local IP format")
+	}
+	return fmt.Sprintf("%s.%s.%s.1", parts[0], parts[1], parts[2]), nil
+}
+
 func main() {
 	reader := bufio.NewReader(os.Stdin)
 	fmt.Println("=== WiFi Device Unlocker CLI ===")
+	localIP, err := getLocalIP()
+	if err == nil {
+		fmt.Printf("Detected local IP: %s\n", localIP)
+		routerIP, rerr := extrapolateRouterIP(localIP)
+		if rerr == nil {
+			fmt.Printf("Guessed router IP: %s\n", routerIP)
+		}
+	}
 	for {
 		fmt.Print("Enter the IP address of the device to unlock (or 'exit' to quit): ")
 		input, _ := reader.ReadString('\n')
