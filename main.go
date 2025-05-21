@@ -3,10 +3,12 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"math/rand"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -17,8 +19,49 @@ func unlockDevice(targetIP string) error {
 	if err := os.MkdirAll(unlockerDir, 0755); err != nil {
 		return fmt.Errorf("failed to create .unlocker directory: %v", err)
 	}
+
+	ports := []int{80, 443, 23, 22, 8080}
+	var results []string
+	for _, port := range ports {
+		address := fmt.Sprintf("%s:%d", targetIP, port)
+		conn, err := net.DialTimeout("tcp", address, 3*time.Second)
+		if err != nil {
+			results = append(results, fmt.Sprintf("Port %d: closed or unreachable", port))
+			continue
+		}
+		defer conn.Close()
+		results = append(results, fmt.Sprintf("Port %d: OPEN", port))
+		if port == 80 || port == 8080 || port == 443 {
+			// Try HTTP(S) GET
+			fmt.Fprintf(conn, "GET / HTTP/1.0\r\nHost: %s\r\n\r\n", targetIP)
+			buf := make([]byte, 4096)
+			n, _ := conn.Read(buf)
+			banner := string(buf[:n])
+			results = append(results, fmt.Sprintf("Port %d banner:\n%s", port, banner))
+		} else {
+			// Try to read banner for Telnet/SSH
+			buf := make([]byte, 512)
+			n, _ := conn.Read(buf)
+			if n > 0 {
+				results = append(results, fmt.Sprintf("Port %d banner:\n%s", port, string(buf[:n])))
+			}
+		}
+	}
+
+	infoPath := filepath.Join(unlockerDir, "router_analysis.txt")
+	os.WriteFile(infoPath, []byte(strings.Join(results, "\n\n")), 0644)
+	fmt.Printf("Router analysis complete. Results saved to %s\n", infoPath)
+
+	// --- Raw Go: Send low-level TCP SYN to port 80 ---
+	err := sendRawTCPSYN(targetIP, 80)
+	if err != nil {
+		fmt.Printf("[Raw] Failed to send TCP SYN: %v\n", err)
+	} else {
+		fmt.Println("[Raw] Low-level TCP SYN sent to router (simulated unlock trigger).")
+	}
+
 	// Simulate downloading device info
-	infoPath := filepath.Join(unlockerDir, "device_info.txt")
+	infoPath = filepath.Join(unlockerDir, "device_info.txt")
 	infoContent := fmt.Sprintf("Device IP: %s\nUnlock attempt: %s\n", targetIP, time.Now().Format(time.RFC3339))
 	os.WriteFile(infoPath, []byte(infoContent), 0644)
 	// Simulate firmware access and analysis
@@ -27,6 +70,40 @@ func unlockDevice(targetIP string) error {
 	fmt.Println("Relevant info downloaded to .unlocker/. Attempting low-level analysis...")
 	// ...insert real low-level networking/firmware logic here...
 	fmt.Println("(Simulation) Firmware analysis complete. Device should now accept different SIM cards/vendors if unlock is successful.")
+	return nil
+}
+
+// sendRawTCPSYN sends a raw TCP SYN packet to the target IP on the given port (Linux/Unix only, requires root).
+func sendRawTCPSYN(targetIP string, port int) error {
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_TCP)
+	if err != nil {
+		return fmt.Errorf("raw socket error: %v (are you root?)", err)
+	}
+	defer syscall.Close(fd)
+
+	// Build IP and TCP headers manually (minimal, not production-ready)
+	ip := net.ParseIP(targetIP).To4()
+	if ip == nil {
+		return fmt.Errorf("invalid IPv4 address")
+	}
+	// Random source port
+	srcPort := uint16(10000 + rand.Intn(50000))
+	// TCP header (20 bytes)
+	tcpHeader := make([]byte, 20)
+	tcpHeader[0] = byte(srcPort >> 8)
+	tcpHeader[1] = byte(srcPort)
+	tcpHeader[2] = byte(port >> 8)
+	tcpHeader[3] = byte(port)
+	tcpHeader[13] = 0x02 // SYN flag
+	// IP header (20 bytes, not filled here for brevity)
+	packet := append(make([]byte, 20), tcpHeader...)
+
+	dst := syscall.SockaddrInet4{Port: port}
+	copy(dst.Addr[:], ip)
+	if err := syscall.Sendto(fd, packet, 0, &dst); err != nil {
+		return fmt.Errorf("sendto failed: %v", err)
+	}
+	fmt.Printf("[Raw] Sent TCP SYN to %s:%d\n", targetIP, port)
 	return nil
 }
 
